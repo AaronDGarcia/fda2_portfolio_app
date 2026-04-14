@@ -5,6 +5,9 @@ import numpy as np
 from datetime import date, timedelta
 import time
 import random
+import plotly.express as px
+import plotly.graph_objects as go
+from scipy import stats
 
 
 @st.cache_data(ttl=3600)
@@ -15,8 +18,10 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
     - warnings_list: messages about truncated ranges or dropped tickers
     """
     warnings = []
+    # map ticker -> human-readable failure reason
+    reasons = {}
     if not tickers:
-        return None, ["No tickers provided"], warnings
+        return None, {"<no_tickers>": "No tickers provided"}, warnings
 
     assets = list(tickers)
     benchmark = "^GSPC"
@@ -39,7 +44,6 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
 
     if raw is None:
         # final attempt: try per-ticker to identify failures
-        errors = []
         frames = {}
         for t in all_tickers:
             ok = False
@@ -60,13 +64,16 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
                         frames[t] = s
                         ok = True
                         break
-                except Exception:
+                except Exception as e:
+                    # record last exception message (trimmed)
+                    reasons[t] = f"Network/error during download: {getattr(e, 'args', [''])[0]}"
                     time.sleep(0.5 + random.uniform(0, 0.2))
             if not ok:
-                errors.append(t)
+                # if we didn't already set a reason above, set a generic one
+                reasons.setdefault(t, "Download failed after retries or insufficient data")
 
-        if len(errors) == len(all_tickers):
-            return None, errors, ["Batched download failed and all per-ticker attempts failed."]
+        if len(frames) == 0:
+            return None, reasons, ["Batched download failed and all per-ticker attempts failed."]
 
         # assemble DataFrame from individual series
         if frames:
@@ -95,16 +102,17 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
         else:
             df = pd.DataFrame()
 
-        # identify obviously missing tickers
-        errors = []
+        # identify obviously missing tickers and mark reasons
+        missing_candidates = []
         for t in all_tickers:
             if t not in df.columns or df[t].dropna().shape[0] < 2:
-                errors.append(t)
+                # mark as insufficient in batched result and try per-ticker fetch
+                reasons[t] = "Insufficient data in batched download"
+                missing_candidates.append(t)
 
         # If some tickers failed, attempt per-ticker retries to isolate failures
-        if errors:
-            still_errors = []
-            for t in errors:
+        if missing_candidates:
+            for t in missing_candidates:
                 ok = False
                 for i in range(per_ticker_retries):
                     try:
@@ -120,13 +128,16 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
                             s = pd.Series(dtype=float)
                         if s.dropna().shape[0] >= 2:
                             df[t] = s
+                            # resolved — remove any previous reason
+                            if t in reasons:
+                                del reasons[t]
                             ok = True
                             break
-                    except Exception:
+                    except Exception as e:
+                        reasons[t] = f"Per-ticker download error: {getattr(e, 'args', [''])[0]}"
                         time.sleep(0.5 + random.uniform(0, 0.2))
                 if not ok:
-                    still_errors.append(t)
-            errors = still_errors
+                    reasons.setdefault(t, "Per-ticker retries failed: network or invalid symbol")
 
     # At this point df contains whatever we fetched; remove columns not in all_tickers
     df = df.loc[:, df.columns.intersection(all_tickers)]
@@ -141,6 +152,7 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
             if missing_frac > drop_threshold:
                 df = df.drop(columns=[t])
                 dropped.append(t)
+                reasons[t] = "Dropped: >5% missing data"
     if dropped:
         warnings.append(f"Dropped tickers due to >5% missing data: {', '.join(dropped)}")
 
@@ -168,13 +180,13 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
                 df = df.loc[start_common:end_common]
                 warnings.append(f"Data truncated to overlapping date range: {start_common.date()} to {end_common.date()}")
 
-    # Final errors list: include any tickers that ultimately have no or insufficient data
-    final_errors = []
+    # Final per-ticker reasons for any tickers not present in final df
+    final_reasons = {}
     for t in all_tickers:
         if t not in df.columns:
-            final_errors.append(t)
+            final_reasons[t] = reasons.get(t, "No usable data after processing")
 
-    return df, final_errors, warnings
+    return df, final_reasons, warnings
 
 
 def main():
@@ -183,23 +195,82 @@ def main():
 
     # Sidebar inputs
     st.sidebar.header("Inputs")
-    tickers_input = st.sidebar.text_area("Enter 3-10 tickers (comma-separated)", value="AAPL, MSFT, GOOGL")
+    # ticker entry UI: add/remove using session state list
+    st.sidebar.subheader("Tickers")
+    st.sidebar.caption('Example: "AAPL for Apple"')
+
+    if 'tickers_list' not in st.session_state:
+        st.session_state['tickers_list'] = ["AAPL", "MSFT", "GOOGL"]
+
+    # text input for a new ticker (stored in session_state via key)
+    st.sidebar.text_input("Add ticker individually (enter symbol, click Add Ticker)", value="", max_chars=10, key='new_ticker')
+
+    def handle_add_ticker():
+        try:
+            t = (st.session_state.get('new_ticker', '') or '').strip().upper()
+            import re
+            if not t:
+                st.sidebar.error("Please enter a ticker symbol before clicking Add.")
+                return
+            if not re.match(r'^[A-Z0-9\.\-]{1,10}$', t):
+                st.sidebar.error("Ticker contains invalid characters. Use letters, numbers, ., or -.")
+                return
+            if t in st.session_state['tickers_list']:
+                st.sidebar.info(f"{t} is already in the list.")
+                return
+            if len(st.session_state['tickers_list']) >= 10:
+                st.sidebar.error("Maximum of 10 tickers allowed.")
+                return
+            st.session_state['tickers_list'].append(t)
+            # clear the input field safely
+            st.session_state['new_ticker'] = ''
+        except Exception as e:
+            st.sidebar.error(f"Failed to add ticker: {e}")
+
+    st.sidebar.button("Add ticker", key='add_ticker', on_click=handle_add_ticker)
+
+    # multiselect uses session_state key 'remove_sel'
+    st.sidebar.multiselect("Remove tickers (select then click Remove)", options=list(st.session_state['tickers_list']), key='remove_sel')
+
+    def handle_remove_tickers():
+        try:
+            remove_sel = st.session_state.get('remove_sel', []) or []
+            for s in list(remove_sel):
+                if s in st.session_state['tickers_list']:
+                    st.session_state['tickers_list'].remove(s)
+            # clear selection
+            st.session_state['remove_sel'] = []
+        except Exception as e:
+            st.sidebar.error(f"Failed to remove selected tickers: {e}")
+
+    st.sidebar.button("Remove selected", key='remove_tickers', on_click=handle_remove_tickers)
+
+    st.sidebar.write("Tickers to load:", ", ".join(st.session_state['tickers_list']))
+
     start = st.sidebar.date_input("Start date", value=date.today() - timedelta(days=365 * 3))
     end = st.sidebar.date_input("End date", value=date.today())
     rf_rate = st.sidebar.number_input("Annual risk-free rate (%)", value=2.0, format="%.2f")
     load_btn = st.sidebar.button("Load data")
 
-    # Parse tickers
-    tickers = [t.strip().upper() for t in tickers_input.replace(";", ",").split(",") if t.strip()]
+    # Use the managed tickers list
+    tickers = list(st.session_state['tickers_list'])
 
     # Layout: tabs for sections (placeholder content)
     tabs = st.tabs(["Inputs & Data", "Exploratory", "Risk", "Correlation", "Portfolio", "Sensitivity", "About"])
 
     with tabs[0]:
         st.header("Inputs & Data")
-        st.write("Tickers:", tickers)
+        # Show tickers or resolved company names in the main tab
         st.write("Date range:", start, "to", end)
         st.write("Risk-free rate (annual %):", rf_rate)
+        st.subheader("Tickers to load")
+        if 'ticker_names' in st.session_state and st.session_state.get('ticker_names'):
+            names_map = st.session_state['ticker_names']
+            for sym in tickers:
+                display_name = names_map.get(sym, sym)
+                st.write(f"- {sym}: {display_name}")
+        else:
+            st.write(", ".join(tickers) if tickers else "(no tickers selected)")
 
         if load_btn:
             if len(tickers) < 3 or len(tickers) > 10:
@@ -208,20 +279,129 @@ def main():
                 st.error("Please select a date range of at least 2 years.")
             else:
                 with st.spinner("Downloading data..."):
-                    prices, errors, warnings = download_data(tickers, start, end)
-                if errors:
-                    st.error(f"Data download issues for: {', '.join(errors)}")
+                    prices, error_map, warnings = download_data(tickers, start, end)
+
+                # show any non-fatal warnings first
+                for w in warnings:
+                    st.warning(w)
+
+                # render per-ticker problems (if any)
+                if error_map:
+                    st.error("Data download issues for the following tickers:")
+                    for t, reason in error_map.items():
+                        # treat drops/insufficient/no-data as warnings; others as errors
+                        low_serv = any(k in reason for k in ("Dropped", "No data", "Insufficient"))
+                        if low_serv:
+                            st.warning(f"{t}: {reason}")
+                        else:
+                            st.error(f"{t}: {reason}")
                 else:
-                    for w in warnings:
-                        st.warning(w)
                     st.success("Data downloaded.")
+                    # persist prices for other tabs
+                    st.session_state['prices'] = prices
+
+                    # resolve company names for display in main tab (cache to session_state)
+                    names_map = {}
+                    for t in tickers:
+                        try:
+                            info = yf.Ticker(t).info
+                            name = info.get('longName') or info.get('shortName') or t
+                        except Exception:
+                            name = t
+                        names_map[t] = name
+                    st.session_state['ticker_names'] = names_map
+
                     st.dataframe(prices.head())
                     st.line_chart(prices.fillna(method="ffill"))
 
     # Placeholder content for other tabs
     with tabs[1]:
         st.header("Exploratory Analysis")
-        st.info("Placeholder: summary statistics, cumulative wealth, distribution plots")
+        st.info("Summary statistics, cumulative wealth, and return distributions")
+
+        prices = st.session_state.get('prices', None)
+        if prices is None:
+            st.warning("No price data loaded. Go to 'Inputs & Data' and click Load data.")
+        else:
+            # compute simple returns
+            returns = prices.pct_change().dropna(how='all')
+
+            # UI controls
+            cols = [c for c in returns.columns]
+            selected = st.selectbox("Select asset for distribution / charts", options=cols, index=0)
+            show_table = st.checkbox("Show summary statistics table", value=True)
+            show_wealth = st.checkbox("Show cumulative wealth chart", value=True)
+            dist_mode = st.radio("Distribution view", options=["Histogram", "Q-Q Plot"], horizontal=True)
+
+            # Summary statistics
+            if show_table:
+                def compute_summary(rts, rf_annual_pct):
+                    rf_daily = rf_annual_pct / 100.0 / 252.0
+                    mean_d = rts.mean()
+                    std_d = rts.std()
+                    skew = rts.skew()
+                    kurt = rts.kurtosis()  # Fisher by default
+                    ann_ret = mean_d * 252.0
+                    ann_vol = std_d * np.sqrt(252.0)
+                    sharpe = (ann_ret - (rf_annual_pct / 100.0)) / ann_vol.replace(0, np.nan)
+                    tbl = pd.DataFrame({
+                        'Mean (daily)': mean_d,
+                        'Std (daily)': std_d,
+                        'Skew': skew,
+                        'Kurtosis': kurt,
+                        'Ann. Return': ann_ret,
+                        'Ann. Vol': ann_vol,
+                        'Sharpe (ann)': sharpe
+                    })
+                    return tbl
+
+                stats_tbl = compute_summary(returns, rf_rate)
+                st.subheader("Summary Statistics")
+                st.dataframe(stats_tbl.style.format({
+                    'Mean (daily)': '{:.6f}', 'Std (daily)': '{:.6f}', 'Skew': '{:.4f}', 'Kurtosis': '{:.4f}',
+                    'Ann. Return': '{:.4f}', 'Ann. Vol': '{:.4f}', 'Sharpe (ann)': '{:.4f}'
+                }))
+
+            # Cumulative wealth
+            if show_wealth:
+                st.subheader("Cumulative Wealth Index (Start = 100)")
+                wealth = (1 + returns).cumprod() * 100.0
+                fig_w = go.Figure()
+                for c in wealth.columns:
+                    fig_w.add_trace(go.Scatter(x=wealth.index, y=wealth[c], mode='lines', name=c))
+                fig_w.update_layout(yaxis_title='Wealth Index', xaxis_title='Date', height=420)
+                st.plotly_chart(fig_w, use_container_width=True)
+
+            # Distribution view for selected asset
+            if dist_mode == "Histogram":
+                st.subheader(f"Return Distribution: {selected}")
+                series = returns[selected].dropna()
+                if series.empty:
+                    st.warning("No return data for selected asset.")
+                else:
+                    mu = series.mean()
+                    sd = series.std()
+                    fig = go.Figure()
+                    fig.add_trace(go.Histogram(x=series, histnorm='probability density', name='Returns', nbinsx=50))
+                    # normal pdf overlay
+                    xs = np.linspace(series.min(), series.max(), 200)
+                    pdf = stats.norm.pdf(xs, loc=mu, scale=sd)
+                    fig.add_trace(go.Scatter(x=xs, y=pdf, mode='lines', name='Normal PDF', line=dict(color='red')))
+                    fig.update_layout(xaxis_title='Daily Return', yaxis_title='Density', height=420)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            else:  # Q-Q plot
+                st.subheader(f"Q-Q Plot: {selected}")
+                series = returns[selected].dropna()
+                if series.empty:
+                    st.warning("No return data for selected asset.")
+                else:
+                    (osm, osr), (slope, intercept, r) = stats.probplot(series, dist='norm')
+                    qq = go.Figure()
+                    qq.add_trace(go.Scatter(x=osm, y=osr, mode='markers', name='Data'))
+                    qq.add_trace(go.Line(x=osm, y=intercept + slope * osm, name='Reference', line=dict(color='red')))
+                    qq.update_layout(xaxis_title='Theoretical Quantiles', yaxis_title='Ordered Values', height=420)
+                    st.plotly_chart(qq, use_container_width=True)
 
     with tabs[2]:
         st.header("Risk Analysis")
