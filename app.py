@@ -843,7 +843,8 @@ def main():
                 combined = pd.concat([w_tbl, metrics_t], axis=0)
 
                 # Build a display-ready DataFrame with formatted strings
-                display_df = combined.copy()
+                # use object dtype to allow formatted string assignment on numeric frames
+                display_df = combined.copy().astype(object)
                 for idx in display_df.index:
                     if idx in sel_assets:
                         # weight rows: 4 decimal places
@@ -1253,7 +1254,8 @@ def main():
                     combined = pd.concat([w_tbl, metrics_df.T], axis=0)
 
                     # Format for display
-                    display_df = combined.copy()
+                    # use object dtype to allow formatted string assignment on numeric frames
+                    display_df = combined.copy().astype(object)
                     for idx in display_df.index:
                         if idx in sel_assets:
                             display_df.loc[idx] = combined.loc[idx].apply(lambda x: f"{float(x):.4f}")
