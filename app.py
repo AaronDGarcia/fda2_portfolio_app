@@ -313,7 +313,8 @@ def main():
                     st.session_state['ticker_names'] = names_map
 
                     st.dataframe(prices.head())
-                    st.line_chart(prices.fillna(method="ffill"))
+                    # use DataFrame.ffill() for forward-fill compatibility
+                    st.line_chart(prices.ffill())
 
     # Placeholder content for other tabs
     with tabs[1]:
