@@ -327,89 +327,257 @@ def main():
             returns = prices.pct_change().dropna(how='all')
 
             # UI controls
-            cols = [c for c in returns.columns]
-            selected = st.selectbox("Select asset for distribution / charts", options=cols, index=0)
-            show_table = st.checkbox("Show summary statistics table", value=True)
-            show_wealth = st.checkbox("Show cumulative wealth chart", value=True)
-            dist_mode = st.radio("Distribution view", options=["Histogram", "Q-Q Plot"], horizontal=True)
+            assets = [c for c in returns.columns]
+            selected = st.selectbox("Select asset for distribution / charts", options=assets, index=0)
+            # Wealth index overlay toggles (one checkbox per ticker)
+            st.markdown("**Wealth index overlay (select tickers to include)**")
+            st.caption("Wealth index shows the hypothetical growth of $10,000 invested at the start date for each selected asset (cumulative simple returns).")
+            overlay_assets = []
+            for c in assets:
+                key = f"wealth_overlay_{c}"
+                try:
+                    sel = st.checkbox(f"Show {c} in Wealth Index", value=True, key=key)
+                except Exception:
+                    # fallback to key-less checkbox if key causes issues
+                    sel = st.checkbox(f"Show {c} in Wealth Index", value=True)
+                if sel:
+                    overlay_assets.append(c)
 
-            # Summary statistics
-            if show_table:
-                def compute_summary(rts, rf_annual_pct):
-                    rf_daily = rf_annual_pct / 100.0 / 252.0
-                    mean_d = rts.mean()
-                    std_d = rts.std()
-                    skew = rts.skew()
-                    kurt = rts.kurtosis()  # Fisher by default
-                    ann_ret = mean_d * 252.0
-                    ann_vol = std_d * np.sqrt(252.0)
-                    sharpe = (ann_ret - (rf_annual_pct / 100.0)) / ann_vol.replace(0, np.nan)
-                    tbl = pd.DataFrame({
-                        'Mean (daily)': mean_d,
-                        'Std (daily)': std_d,
-                        'Skew': skew,
-                        'Kurtosis': kurt,
-                        'Ann. Return': ann_ret,
-                        'Ann. Vol': ann_vol,
-                        'Sharpe (ann)': sharpe
-                    })
-                    return tbl
+            # Summary statistics (always shown)
+            def compute_summary(rts, rf_annual_pct):
+                rf_daily = rf_annual_pct / 100.0 / 252.0
+                mean_d = rts.mean()
+                std_d = rts.std()
+                skew = rts.skew()
+                kurt = rts.kurtosis()  # Fisher by default
+                ann_ret = mean_d * 252.0
+                ann_vol = std_d * np.sqrt(252.0)
+                sharpe = (ann_ret - (rf_annual_pct / 100.0)) / ann_vol.replace(0, np.nan)
+                tbl = pd.DataFrame({
+                    'Mean (daily)': mean_d,
+                    'Std (daily)': std_d,
+                    'Skew': skew,
+                    'Kurtosis': kurt,
+                    'Ann. Return': ann_ret,
+                    'Ann. Vol': ann_vol,
+                    'Sharpe (ann)': sharpe
+                })
+                # Convert return values to percentages for display (keep skew/kurtosis/sharpe as-is)
+                for col in ['Mean (daily)', 'Std (daily)', 'Ann. Return', 'Ann. Vol']:
+                    tbl[col] = tbl[col] * 100.0
+                return tbl
 
-                stats_tbl = compute_summary(returns, rf_rate)
-                st.subheader("Summary Statistics")
-                st.dataframe(stats_tbl.style.format({
-                    'Mean (daily)': '{:.6f}', 'Std (daily)': '{:.6f}', 'Skew': '{:.4f}', 'Kurtosis': '{:.4f}',
-                    'Ann. Return': '{:.4f}', 'Ann. Vol': '{:.4f}', 'Sharpe (ann)': '{:.4f}'
-                }))
+            stats_tbl = compute_summary(returns, rf_rate)
+            st.subheader("Summary Statistics of Returns")
+            st.dataframe(stats_tbl.style.format({
+                'Mean (daily)': '{:.2f}%', 'Std (daily)': '{:.2f}%', 'Skew': '{:.2f}', 'Kurtosis': '{:.2f}',
+                'Ann. Return': '{:.2f}%', 'Ann. Vol': '{:.2f}%', 'Sharpe (ann)': '{:.2f}'
+            }))
 
-            # Cumulative wealth
-            if show_wealth:
-                st.subheader("Cumulative Wealth Index (Start = 100)")
-                wealth = (1 + returns).cumprod() * 100.0
-                fig_w = go.Figure()
-                for c in wealth.columns:
+            # Cumulative wealth (always shown)
+            st.subheader("Cumulative Wealth Index (Start = $10,000)")
+            wealth = (1 + returns).cumprod() * 10000.0
+            fig_w = go.Figure()
+            # plot only selected overlay assets for clarity
+            for c in overlay_assets:
+                if c in wealth.columns:
                     fig_w.add_trace(go.Scatter(x=wealth.index, y=wealth[c], mode='lines', name=c))
-                fig_w.update_layout(yaxis_title='Wealth Index', xaxis_title='Date', height=420)
-                st.plotly_chart(fig_w, use_container_width=True)
+            fig_w.update_layout(yaxis_title='Wealth Index', xaxis_title='Date', height=420)
+            st.plotly_chart(fig_w, use_container_width=True)
 
-            # Distribution view for selected asset
-            if dist_mode == "Histogram":
-                st.subheader(f"Return Distribution: {selected}")
-                series = returns[selected].dropna()
-                if series.empty:
-                    st.warning("No return data for selected asset.")
-                else:
+            # Show Histogram and Q-Q side-by-side
+            st.subheader(f"Return Distribution & Q-Q: {selected}")
+            series = returns[selected].dropna()
+            if series.empty:
+                st.warning("No return data for selected asset.")
+            else:
+                col1, col2 = st.columns(2)
+                # Histogram + normal PDF
+                with col1:
                     mu = series.mean()
                     sd = series.std()
                     fig = go.Figure()
                     fig.add_trace(go.Histogram(x=series, histnorm='probability density', name='Returns', nbinsx=50))
-                    # normal pdf overlay
                     xs = np.linspace(series.min(), series.max(), 200)
                     pdf = stats.norm.pdf(xs, loc=mu, scale=sd)
                     fig.add_trace(go.Scatter(x=xs, y=pdf, mode='lines', name='Normal PDF', line=dict(color='red')))
                     fig.update_layout(xaxis_title='Daily Return', yaxis_title='Density', height=420)
                     st.plotly_chart(fig, use_container_width=True)
 
-            else:  # Q-Q plot
-                st.subheader(f"Q-Q Plot: {selected}")
-                series = returns[selected].dropna()
-                if series.empty:
-                    st.warning("No return data for selected asset.")
-                else:
+                # Q-Q plot
+                with col2:
                     (osm, osr), (slope, intercept, r) = stats.probplot(series, dist='norm')
                     qq = go.Figure()
                     qq.add_trace(go.Scatter(x=osm, y=osr, mode='markers', name='Data'))
-                    qq.add_trace(go.Line(x=osm, y=intercept + slope * osm, name='Reference', line=dict(color='red')))
+                    qq.add_trace(go.Scatter(x=osm, y=intercept + slope * osm, mode='lines', name='Reference', line=dict(color='red')))
                     qq.update_layout(xaxis_title='Theoretical Quantiles', yaxis_title='Ordered Values', height=420)
                     st.plotly_chart(qq, use_container_width=True)
 
     with tabs[2]:
         st.header("Risk Analysis")
-        st.info("Placeholder: rolling volatility, drawdowns, Sharpe/Sortino table")
+        st.info("Rolling volatility, drawdowns, Sharpe / Sortino, VaR")
+
+        prices = st.session_state.get('prices', None)
+        if prices is None:
+            st.warning("No price data loaded. Go to 'Inputs & Data' and click Load data.")
+        else:
+            # returns (simple)
+            returns = prices.pct_change().dropna(how='all')
+            assets = [c for c in returns.columns]
+
+            # Controls: rolling window dropdown and drawdown asset dropdown
+            cols = st.columns([1, 1, 1])
+            with cols[0]:
+                rolling_window = st.selectbox("Rolling window (days)", options=[30, 60, 90, 120], index=1)
+            with cols[1]:
+                dd_asset = st.selectbox("Drawdown asset", options=assets, index=0)
+            with cols[2]:
+                var_conf = st.selectbox("VaR confidence (%)", options=[90, 95, 99], index=1)
+
+            # Compute rolling volatility (annualized)
+            roll_std = returns.rolling(window=rolling_window).std() * np.sqrt(252.0)
+
+            fig_rv = go.Figure()
+            for a in assets:
+                if a in roll_std.columns:
+                    fig_rv.add_trace(go.Scatter(x=roll_std.index, y=roll_std[a], mode='lines', name=a))
+            fig_rv.update_layout(title=f"Rolling annualized volatility ({rolling_window}-day)", yaxis_title='Annualized Vol (%)', height=420)
+            st.plotly_chart(fig_rv, use_container_width=True)
+
+            # Drawdown for selected asset
+            s = returns[dd_asset].dropna()
+            wealth = (1 + s).cumprod()
+            running_max = wealth.cummax()
+            drawdown = wealth / running_max - 1
+            max_dd = drawdown.min()
+            trough = drawdown.idxmin()
+            peak = wealth.loc[:trough].idxmax() if not drawdown.empty else None
+
+            # Prominently display Max Drawdown for selected asset
+            if drawdown.empty or pd.isna(max_dd):
+                st.subheader(f"Max Drawdown ({dd_asset}): N/A")
+            else:
+                st.subheader(f"Max Drawdown ({dd_asset})")
+                st.metric(label=f"Max Drawdown ({dd_asset})", value=f"{max_dd * 100:.2f}%")
+
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown * 100.0, mode='lines', fill='tozeroy', name=f'{dd_asset} drawdown'))
+            if trough is not None:
+                fig_dd.add_vline(x=trough, line=dict(color='red', dash='dash'))
+                fig_dd.add_annotation(x=trough, y=(drawdown.loc[trough] * 100.0), text=f"Max DD {max_dd:.2%}\nTrough: {trough.date()}", showarrow=True, yanchor='bottom')
+            fig_dd.update_layout(title=f"Drawdown: {dd_asset}", yaxis_title='Drawdown (%)', height=360)
+            st.plotly_chart(fig_dd, use_container_width=True)
+
+            # Risk metrics table for all assets
+            def compute_metrics(col_series):
+                mean_d = col_series.mean()
+                std_d = col_series.std()
+                ann_ret = mean_d * 252.0
+                ann_vol = std_d * np.sqrt(252.0)
+                sharpe = (ann_ret - (rf_rate / 100.0)) / ann_vol if ann_vol != 0 else np.nan
+                # Sortino: downside std (daily) -> annualize
+                downside = col_series[col_series < 0]
+                downside_std = downside.std()
+                downside_ann = downside_std * np.sqrt(252.0) if not np.isnan(downside_std) else np.nan
+                sortino = (ann_ret - (rf_rate / 100.0)) / downside_ann if downside_ann and downside_ann != 0 else np.nan
+                # Max drawdown
+                w = (1 + col_series).cumprod()
+                dd = w / w.cummax() - 1
+                mdd = dd.min()
+                # VaR (historical, daily) and CVaR
+                alpha = 100 - int(var_conf)
+                var = np.percentile(col_series.dropna(), alpha)
+                cvar = col_series[col_series <= var].mean() if not col_series.dropna().empty else np.nan
+                return {
+                    'Ann. Vol': ann_vol * 100.0,
+                    'Sharpe (ann)': sharpe,
+                    'Sortino (ann)': sortino,
+                    'Max Drawdown': mdd * 100.0,
+                    f'VaR ({var_conf}%)': var * 100.0,
+                    f'CVaR ({var_conf}%)': cvar * 100.0
+                }
+
+            metrics = {a: compute_metrics(returns[a].dropna()) for a in assets}
+            metrics_df = pd.DataFrame(metrics).T
+
+            # Format and display: percentages two decimals, ratios two decimals
+            fmt = {}
+            for col in ['Ann. Vol', 'Max Drawdown', f'VaR ({var_conf}%)', f'CVaR ({var_conf}%)']:
+                if col in metrics_df.columns:
+                    fmt[col] = '{:.2f}%'
+            for col in ['Sharpe (ann)', 'Sortino (ann)']:
+                if col in metrics_df.columns:
+                    fmt[col] = '{:.2f}'
+
+            st.subheader('Risk Metrics (per asset)')
+            st.dataframe(metrics_df.style.format(fmt))
 
     with tabs[3]:
         st.header("Correlation & Covariance")
-        st.info("Placeholder: correlation heatmap, rolling correlation, covariance matrix")
+        st.info("Correlation matrix, rolling correlations, and covariance (expand to view)")
+
+        prices = st.session_state.get('prices', None)
+        if prices is None:
+            st.warning("No price data loaded. Go to 'Inputs & Data' and click Load data.")
+        else:
+            returns = prices.pct_change().dropna(how='all')
+            assets = [c for c in returns.columns]
+
+            # Controls: asset selection, method, rolling window
+            with st.sidebar.expander('Correlation & Covariance settings', expanded=False):
+                sel_assets = st.multiselect('Select assets', options=assets, default=assets)
+                corr_method = st.selectbox('Correlation method', options=['pearson', 'spearman'], index=0)
+                rolling_window_corr = st.selectbox('Rolling window (days)', options=[30, 60, 90, 120], index=1)
+
+            if not sel_assets:
+                st.warning('Select at least one asset to compute correlations/covariance.')
+            else:
+                returns_sel = returns[sel_assets].dropna(how='all')
+
+                # Correlation matrix
+                corr = returns_sel.corr(method=corr_method)
+                st.subheader('Correlation Matrix')
+                fig_corr = px.imshow(corr, text_auto='.2f', zmin=-1, zmax=1, color_continuous_scale='RdBu_r')
+                fig_corr.update_layout(height=520)
+                st.plotly_chart(fig_corr, use_container_width=True)
+
+                # Average pairwise correlation metric
+                if len(sel_assets) > 1:
+                    tri = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+                    avg_pair = tri.stack().mean()
+                    st.metric(label='Average pairwise correlation', value=f"{avg_pair:.2f}")
+
+                # Rolling correlation for two user-selected stocks
+                if len(sel_assets) >= 2:
+                    st.markdown("**Rolling correlation between two selected stocks**")
+                    sc1, sc2 = st.columns(2)
+                    with sc1:
+                        stock1 = st.selectbox('Stock 1', options=sel_assets, index=0)
+                    with sc2:
+                        # default to second asset if available
+                        default_idx = 1 if len(sel_assets) > 1 else 0
+                        stock2 = st.selectbox('Stock 2', options=sel_assets, index=default_idx)
+
+                    if stock1 == stock2:
+                        st.warning('Select two different assets to view a meaningful rolling correlation.')
+                    else:
+                        rc_series = returns_sel[stock1].rolling(window=rolling_window_corr).corr(returns_sel[stock2])
+                        fig_pair = go.Figure()
+                        fig_pair.add_trace(go.Scatter(x=rc_series.index, y=rc_series, mode='lines', name=f'{stock1}/{stock2}'))
+                        fig_pair.update_layout(title=f'Rolling correlation: {stock1} vs {stock2} ({rolling_window_corr}-day)', yaxis_title='Correlation', height=360)
+                        st.plotly_chart(fig_pair, use_container_width=True)
+
+                # Covariance matrix (annualized) in an expander
+                cov_annual = returns_sel.cov() * 252.0
+                with st.expander('Covariance matrix (annualized) — expand to view / download', expanded=False):
+                    st.write('Annualized covariance of daily returns (decimal units).')
+                    st.dataframe(cov_annual.style.format('{:.6f}'))
+                    csv = cov_annual.to_csv().encode('utf-8')
+                    st.download_button('Download covariance CSV', data=csv, file_name='covariance_annual.csv', mime='text/csv')
+
+                # Allow download of correlation matrix as CSV
+                csv_corr = corr.to_csv().encode('utf-8')
+                st.download_button('Download correlation CSV', data=csv_corr, file_name='correlation.csv', mime='text/csv')
 
     with tabs[4]:
         st.header("Portfolio Construction")
