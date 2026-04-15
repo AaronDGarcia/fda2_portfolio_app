@@ -192,7 +192,7 @@ def download_data(tickers, start_date, end_date, *, max_retries=3, per_ticker_re
 
 def main():
     st.set_page_config(page_title="Interactive Portfolio App", layout="wide")
-    st.title("Interactive Portfolio Analytics — (scaffold)")
+    st.title("Interactive Portfolio Analytics")
 
     # Sidebar inputs
     st.sidebar.header("Inputs")
@@ -256,7 +256,7 @@ def main():
     # Use the managed tickers list
     tickers = list(st.session_state['tickers_list'])
 
-    # Layout: tabs for sections (placeholder content)
+    # Layout: tabs for sections
     tabs = st.tabs(["Inputs & Data", "Exploratory", "Risk", "Correlation", "Portfolio", "Sensitivity", "About"])
 
     with tabs[0]:
@@ -316,7 +316,7 @@ def main():
                     # use DataFrame.ffill() for forward-fill compatibility
                     st.line_chart(prices.ffill())
 
-    # Placeholder content for other tabs
+    # Content for other tabs
     with tabs[1]:
         st.header("Exploratory Analysis")
         st.info("Summary statistics, cumulative wealth, and return distributions")
@@ -1097,7 +1097,7 @@ def main():
                     fig.update_layout(yaxis_title='Wealth ($)', xaxis_title='Date', height=480)
                     st.plotly_chart(fig, use_container_width=True)
 
-                # Monte Carlo and rebalancing removed per user request
+                # Monte Carlo and rebalancing not included
 
     with tabs[5]:
         st.header("Estimation Window Sensitivity")
